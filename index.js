@@ -1,11 +1,10 @@
-const WebSocket = require('ws');
+// Initialize Express
 const express = require('express');
 const https = require('https');
 const mysql = require('mysql2/promise');
 
 // Configuration
-const PORT = process.env.PORT || 8181;
-const WS_PATH = '/fingerprint';
+const PORT = process.env.PORT || 8080; // Changed to 8080 for HTTPS
 const isProduction = process.env.NODE_ENV === 'production';
 
 // MySQL Database Configuration
@@ -16,9 +15,10 @@ const dbConfig = {
   database: 'u617065149_Ayushi'
 };
 
+
 // Initialize Express
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Allow larger payloads for fingerprint data
 
 // Initialize MySQL Connection Pool
 const pool = mysql.createPool(dbConfig);
@@ -93,98 +93,105 @@ async function verifyFingerprint(userId, sampleData) {
   }
 }
 
-// WebSocket Server
-const server = isProduction ? https.createServer(app) : app;
-const wss = new WebSocket.Server({ server, path: WS_PATH });
-
-wss.on('connection', (ws, req) => {
-  log(`Client connected to fingerprint service from ${req.socket.remoteAddress}`);
-
-  ws.on('message', async (message) => {
-    try {
-      const data = JSON.parse(message);
-      log(`Received command: ${data.command}`);
-
-      let response;
-
-      switch (data.command) {
-        case 'initialize':
-          response = { 
-            success: true, 
-            type: 'initialized',
-            devices: [{ id: 'dp-client', name: 'DigitalPersona Client Scanner' }]
-          };
-          break;
-
-        case 'list_devices':
-          response = { 
-            success: true, 
-            devices: [{ id: 'dp-client', name: 'DigitalPersona Client Scanner' }]
-          };
-          break;
-
-        case 'capture':
-          response = { 
-            success: true, 
-            message: 'Capture request received; use client-side DigitalPersona scanner'
-          };
-          break;
-
-        case 'enroll':
-          response = await enrollFingerprint(data.userId, data.sample);
-          break;
-
-        case 'verify':
-          response = await verifyFingerprint(data.userId, data.sample);
-          break;
-
-        case 'list_templates':
-          const [rows] = await pool.query('SELECT user_id FROM gym_fingerprints');
-          response = { 
-            success: true, 
-            templates: rows.map(row => row.user_id),
-            count: rows.length
-          };
-          break;
-
-        case 'delete_template':
-          if (!data.userId) {
-            response = { success: false, error: 'userId is required' };
-          } else {
-            const [result] = await pool.query(
-              'DELETE FROM gym_fingerprints WHERE user_id = ?',
-              [data.userId]
-            );
-            response = { 
-              success: result.affectedRows > 0,
-              message: result.affectedRows > 0 ? 'Template deleted' : 'Template not found'
-            };
-          }
-          break;
-
-        default:
-          response = { success: false, error: 'Unknown command' };
-      }
-
-      ws.send(JSON.stringify(response));
-    } catch (error) {
-      log(`WebSocket message error: ${error.message}`, 'error');
-      ws.send(JSON.stringify({ success: false, error: error.message }));
-    }
-  });
-
-  ws.on('close', () => {
-    log('Client disconnected');
-  });
-
-  ws.on('error', (error) => {
-    log(`WebSocket client error: ${error.message}`, 'error');
-  });
+// HTTPS Endpoints
+app.post('/fingerprint/initialize', async (req, res) => {
+  try {
+    log('Received initialize request');
+    res.json({ 
+      success: true, 
+      type: 'initialized',
+      devices: [{ id: 'dp-client', name: 'DigitalPersona Client Scanner' }]
+    });
+  } catch (error) {
+    log(`Initialize error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// Test WebSocket Endpoint (HTTP fallback for debugging)
-app.get('/fingerprint/test', (req, res) => {
-  res.json({ status: 'ok', message: 'WebSocket server is running', path: WS_PATH });
+app.post('/fingerprint/list_devices', async (req, res) => {
+  try {
+    log('Received list_devices request');
+    res.json({ 
+      success: true, 
+      devices: [{ id: 'dp-client', name: 'DigitalPersona Client Scanner' }]
+    });
+  } catch (error) {
+    log(`List devices error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/fingerprint/capture', async (req, res) => {
+  try {
+    log('Received capture request');
+    res.json({ 
+      success: true, 
+      message: 'Capture request received; use client-side DigitalPersona scanner'
+    });
+  } catch (error) {
+    log(`Capture error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/fingerprint/enroll', async (req, res) => {
+  try {
+    const { userId, sample } = req.body;
+    log(`Received enroll request for user ${userId}`);
+    const response = await enrollFingerprint(userId, sample);
+    res.json(response);
+  } catch (error) {
+    log(`Enroll error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/fingerprint/verify', async (req, res) => {
+  try {
+    const { userId, sample } = req.body;
+    log(`Received verify request for user ${userId}`);
+    const response = await verifyFingerprint(userId, sample);
+    res.json(response);
+  } catch (error) {
+    log(`Verify error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/fingerprint/list_templates', async (req, res) => {
+  try {
+    log('Received list_templates request');
+    const [rows] = await pool.query('SELECT user_id FROM gym_fingerprints');
+    res.json({ 
+      success: true, 
+      templates: rows.map(row => row.user_id),
+      count: rows.length
+    });
+  } catch (error) {
+    log(`List templates error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/fingerprint/delete_template', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'userId is required' });
+    }
+    log(`Received delete_template request for user ${userId}`);
+    const [result] = await pool.query(
+      'DELETE FROM gym_fingerprints WHERE user_id = ?',
+      [userId]
+    );
+    res.json({ 
+      success: result.affectedRows > 0,
+      message: result.affectedRows > 0 ? 'Template deleted' : 'Template not found'
+    });
+  } catch (error) {
+    log(`Delete template error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Health Check Endpoint
@@ -197,15 +204,16 @@ app.get('/health', async (req, res) => {
       templatesCount: (await pool.query('SELECT COUNT(*) as count FROM gym_fingerprints'))[0][0].count
     });
   } catch (error) {
+    log(`Health check error: ${error.message}`, 'error');
     res.status(500).json({ status: 'error', error: 'Database connection failed' });
   }
 });
 
 // Start Server
+const server = isProduction ? https.createServer(app) : app;
 server.listen(PORT, async () => {
-  log(`WebSocket server ready at ws${isProduction ? 's' : ''}://0.0.0.0:${PORT}${WS_PATH}`);
-  log(`Health check at http://0.0.0.0:${PORT}/health`);
-  log(`Test endpoint at http://0.0.0.0:${PORT}/fingerprint/test`);
+  log(`HTTPS server ready at http${isProduction ? 's' : ''}://0.0.0.0:${PORT}/fingerprint`);
+  log(`Health check at http${isProduction ? 's' : ''}://0.0.0.0:${PORT}/health`);
 
   try {
     await pool.query('SELECT 1');
@@ -219,8 +227,8 @@ server.listen(PORT, async () => {
 process.on('SIGINT', async () => {
   log('Shutting down...');
   await pool.end();
-  wss.close(() => {
-    log('WebSocket server closed');
+  server.close(() => {
+    log('HTTPS server closed');
     process.exit(0);
   });
 });
