@@ -1,10 +1,10 @@
-// Initialize Express
 const express = require('express');
+const cors = require('cors');
 const https = require('https');
 const mysql = require('mysql2/promise');
 
 // Configuration
-const PORT = process.env.PORT || 8080; // Changed to 8080 for HTTPS
+const PORT = process.env.PORT || 8080;
 const isProduction = process.env.NODE_ENV === 'production';
 
 // MySQL Database Configuration
@@ -18,7 +18,13 @@ const dbConfig = {
 
 // Initialize Express
 const app = express();
-app.use(express.json({ limit: '10mb' })); // Allow larger payloads for fingerprint data
+app.use(express.json({ limit: '10mb' })); // Allow large fingerprint payloads
+app.use(cors({
+  origin: 'https://musclemanias.in', // Allow your client origin
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.options('*', cors()); // Handle preflight for all routes
 
 // Initialize MySQL Connection Pool
 const pool = mysql.createPool(dbConfig);
@@ -30,7 +36,6 @@ function log(message, level = 'info') {
 
 // Process DigitalPersona sample (placeholder; replace with SDK on-premise)
 function processDigitalPersonaSample(sampleData) {
-  // DigitalPersona client sends base64-encoded feature set
   return Buffer.from(sampleData, 'base64').toString('base64').slice(0, 512); // Simplified
 }
 
@@ -43,7 +48,6 @@ async function enrollFingerprint(userId, sampleData) {
 
     const template = processDigitalPersonaSample(sampleData);
 
-    // Store in MySQL
     await pool.query(
       'INSERT INTO gym_fingerprints (user_id, template, created_at) VALUES (?, ?, ?)',
       [userId, template, new Date()]
@@ -96,7 +100,7 @@ async function verifyFingerprint(userId, sampleData) {
 // HTTPS Endpoints
 app.post('/fingerprint/initialize', async (req, res) => {
   try {
-    log('Received initialize request');
+    log(`Initialize request from ${req.get('Origin') || 'unknown'}`);
     res.json({ 
       success: true, 
       type: 'initialized',
