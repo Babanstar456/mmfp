@@ -1,21 +1,21 @@
 {
-  "name": "fingerprint-websocket-server",
+  "name": "fingerprint-verification-service",
   "version": "1.0.0",
-  "description": "WebSocket server for DigitalPersona fingerprint integration",
+  "description": "WebSocket server for fingerprint processing with DigitalPersona and MySQL",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "mysql2": "^3.15.2",
-    "ws": "^8.14.2"
+    "ws": "^8.18.0",
+    "mysql2": "^3.11.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.1.4"
   },
-  "engines": {
-    "node": ">=14.0.0"
-  }
+  "author": "Your Name",
+  "license": "ISC"
 }
