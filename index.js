@@ -9,12 +9,11 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 // MySQL Database Configuration
 const dbConfig = {
-  host: process.env.DB_HOST || '217.21.84.52',
-  user: 'u617065149_ayushi',
-  password: 'Ayushi@TINT25',
+  host: '217.21.84.52',
+  user:  'u617065149_ayushi',
+  password:  'Ayushi@TINT25',
   database: 'u617065149_Ayushi'
 };
-
 
 // Initialize Express
 const app = express();
@@ -24,7 +23,6 @@ app.use(cors({
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.options('*', cors()); // Handle preflight for all routes
 
 // Initialize MySQL Connection Pool
 const pool = mysql.createPool(dbConfig);
