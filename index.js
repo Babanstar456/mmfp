@@ -30,8 +30,7 @@ function log(message, level = 'info') {
 
 // Process DigitalPersona sample (placeholder; replace with SDK on-premise)
 function processDigitalPersonaSample(sampleData) {
-  // DigitalPersona client sends base64-encoded feature set or raw data
-  // In production, use SDK on an on-premise server to extract template
+  // DigitalPersona client sends base64-encoded feature set
   return Buffer.from(sampleData, 'base64').toString('base64').slice(0, 512); // Simplified
 }
 
@@ -66,7 +65,6 @@ async function enrollFingerprint(userId, sampleData) {
 // Verify Fingerprint
 async function verifyFingerprint(userId, sampleData) {
   try {
-    // Retrieve template from MySQL
     const [rows] = await pool.query(
       'SELECT template FROM gym_fingerprints WHERE user_id = ? LIMIT 1',
       [userId]
@@ -79,9 +77,8 @@ async function verifyFingerprint(userId, sampleData) {
     const storedTemplate = rows[0].template;
     const newTemplate = processDigitalPersonaSample(sampleData);
 
-    // Simplified matching (replace with SDK in production)
     const matched = storedTemplate === newTemplate;
-    const score = matched ? 90 : 10; // Simulated score
+    const score = matched ? 90 : 10;
 
     log(`Verification for user ${userId}: ${matched ? 'Success' : 'Failed'}`);
     return { 
@@ -100,8 +97,8 @@ async function verifyFingerprint(userId, sampleData) {
 const server = isProduction ? https.createServer(app) : app;
 const wss = new WebSocket.Server({ server, path: WS_PATH });
 
-wss.on('connection', (ws) => {
-  log('Client connected to fingerprint service');
+wss.on('connection', (ws, req) => {
+  log(`Client connected to fingerprint service from ${req.socket.remoteAddress}`);
 
   ws.on('message', async (message) => {
     try {
@@ -181,14 +178,19 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('error', (error) => {
-    log(`WebSocket error: ${error.message}`, 'error');
+    log(`WebSocket client error: ${error.message}`, 'error');
   });
+});
+
+// Test WebSocket Endpoint (HTTP fallback for debugging)
+app.get('/fingerprint/test', (req, res) => {
+  res.json({ status: 'ok', message: 'WebSocket server is running', path: WS_PATH });
 });
 
 // Health Check Endpoint
 app.get('/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1'); // Test DB connection
+    await pool.query('SELECT 1');
     res.json({ 
       status: 'ok', 
       dbConnected: true,
@@ -203,8 +205,8 @@ app.get('/health', async (req, res) => {
 server.listen(PORT, async () => {
   log(`WebSocket server ready at ws${isProduction ? 's' : ''}://0.0.0.0:${PORT}${WS_PATH}`);
   log(`Health check at http://0.0.0.0:${PORT}/health`);
+  log(`Test endpoint at http://0.0.0.0:${PORT}/fingerprint/test`);
 
-  // Verify DB connection
   try {
     await pool.query('SELECT 1');
     log('Database connected successfully');
