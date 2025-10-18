@@ -1,31 +1,42 @@
 const express = require('express');
 const cors = require('cors');
-const https = require('https');
 const mysql = require('mysql2/promise');
 
 // Configuration
 const PORT = process.env.PORT || 8080;
-const isProduction = process.env.NODE_ENV === 'production';
 
 // MySQL Database Configuration
 const dbConfig = {
   host: '217.21.84.52',
-  user:  'u617065149_ayushi',
-  password:  'Ayushi@TINT25',
+  user: 'u617065149_ayushi',
+  password: 'Ayushi@TINT25',
   database: 'u617065149_Ayushi'
 };
 
 // Initialize Express
 const app = express();
-app.use(express.json({ limit: '10mb' })); // Allow large fingerprint payloads
+
+// CORS Configuration - MUST be before routes
 app.use(cors({
-  origin: 'https://musclemanias.in', // Allow your client origin
+  origin: ['https://musclemanias.in', 'http://localhost:3000'], // Allow both production and local dev
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
+// Handle preflight requests explicitly
+app.options('*', cors());
+
+// Body parser
+app.use(express.json({ limit: '10mb' }));
+
 // Initialize MySQL Connection Pool
-const pool = mysql.createPool(dbConfig);
+const pool = mysql.createPool({
+  ...dbConfig,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
 
 // Logging helper
 function log(message, level = 'info') {
@@ -34,7 +45,7 @@ function log(message, level = 'info') {
 
 // Process DigitalPersona sample (placeholder; replace with SDK on-premise)
 function processDigitalPersonaSample(sampleData) {
-  return Buffer.from(sampleData, 'base64').toString('base64').slice(0, 512); // Simplified
+  return Buffer.from(sampleData, 'base64').toString('base64').slice(0, 512);
 }
 
 // Enroll Fingerprint
@@ -95,7 +106,16 @@ async function verifyFingerprint(userId, sampleData) {
   }
 }
 
-// HTTPS Endpoints
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'running',
+    service: 'Fingerprint API',
+    version: '1.0.0'
+  });
+});
+
+// API Endpoints
 app.post('/fingerprint/initialize', async (req, res) => {
   try {
     log(`Initialize request from ${req.get('Origin') || 'unknown'}`);
@@ -200,10 +220,11 @@ app.delete('/fingerprint/delete_template', async (req, res) => {
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
+    const [result] = await pool.query('SELECT COUNT(*) as count FROM gym_fingerprints');
     res.json({ 
       status: 'ok', 
       dbConnected: true,
-      templatesCount: (await pool.query('SELECT COUNT(*) as count FROM gym_fingerprints'))[0][0].count
+      templatesCount: result[0].count
     });
   } catch (error) {
     log(`Health check error: ${error.message}`, 'error');
@@ -211,11 +232,16 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Start Server
-const server = isProduction ? https.createServer(app) : app;
-server.listen(PORT, async () => {
-  log(`HTTPS server ready at http${isProduction ? 's' : ''}://0.0.0.0:${PORT}/fingerprint`);
-  log(`Health check at http${isProduction ? 's' : ''}://0.0.0.0:${PORT}/health`);
+// Error handling middleware
+app.use((err, req, res, next) => {
+  log(`Unhandled error: ${err.message}`, 'error');
+  res.status(500).json({ success: false, error: 'Internal server error' });
+});
+
+// Start Server (HTTP only - Render handles HTTPS)
+app.listen(PORT, async () => {
+  log(`Server ready at http://0.0.0.0:${PORT}`);
+  log(`Health check at http://0.0.0.0:${PORT}/health`);
 
   try {
     await pool.query('SELECT 1');
@@ -229,8 +255,11 @@ server.listen(PORT, async () => {
 process.on('SIGINT', async () => {
   log('Shutting down...');
   await pool.end();
-  server.close(() => {
-    log('HTTPS server closed');
-    process.exit(0);
-  });
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  log('SIGTERM received, shutting down...');
+  await pool.end();
+  process.exit(0);
 });
