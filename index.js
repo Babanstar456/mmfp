@@ -24,7 +24,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.options('*', cors()); // Handle preflight for all routes
+app.options('*','https://musclemanias.com', cors()); // Handle preflight for all routes
 
 // Initialize MySQL Connection Pool
 const pool = mysql.createPool(dbConfig);
