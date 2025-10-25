@@ -16,9 +16,9 @@ const dbConfig = {
 // Initialize Express
 const app = express();
 
-// CORS Configuration - MUST be before routes
+// CORS Configuration
 app.use(cors({
-  origin: ['https://musclemanias.in', 'http://localhost:3000'], // Allow both production and local dev
+  origin: ['https://musclemanias.in', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -43,31 +43,32 @@ function log(message, level = 'info') {
   console.log(`[${new Date().toISOString()}] ${level.toUpperCase()}: ${message}`);
 }
 
-// Process DigitalPersona sample (placeholder; replace with SDK on-premise)
-function processDigitalPersonaSample(sampleData) {
+// --- Fingerprint Processing (Mock for now) ---
+function processFingerprintSample(sampleData) {
   return Buffer.from(sampleData, 'base64').toString('base64').slice(0, 512);
 }
 
-// Enroll Fingerprint
-async function enrollFingerprint(userId, sampleData) {
+// --- Enroll Fingerprint ---
+async function enrollFingerprint(userId, sampleData, fingerName, status) {
   try {
-    if (!userId || !sampleData) {
-      throw new Error('userId and sample are required');
-    }
+    if (!userId || !sampleData) throw new Error('userId and sample are required');
 
-    const template = processDigitalPersonaSample(sampleData);
+    const template = processFingerprintSample(sampleData);
+    const finalStatus = status || 'Active';
 
     await pool.query(
-      'INSERT INTO gym_fingerprints (user_id, template, created_at) VALUES (?, ?, ?)',
-      [userId, template, new Date()]
+      'INSERT INTO gym_fingerprints (user_id, template, finger_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
+      [userId, template, fingerName || 'Unknown', finalStatus, new Date()]
     );
 
-    log(`Fingerprint enrolled for user ${userId}`);
-    return { 
-      success: true, 
+    log(`Fingerprint enrolled for user ${userId} (${fingerName || 'Unknown'})`);
+
+    return {
+      success: true,
       message: 'Enrollment successful',
       userId,
-      template
+      fingerName,
+      status: finalStatus
     };
   } catch (error) {
     log(`Enrollment failed: ${error.message}`, 'error');
@@ -75,7 +76,7 @@ async function enrollFingerprint(userId, sampleData) {
   }
 }
 
-// Verify Fingerprint
+// --- Verify Fingerprint ---
 async function verifyFingerprint(userId, sampleData) {
   try {
     const [rows] = await pool.query(
@@ -88,14 +89,15 @@ async function verifyFingerprint(userId, sampleData) {
     }
 
     const storedTemplate = rows[0].template;
-    const newTemplate = processDigitalPersonaSample(sampleData);
+    const newTemplate = processFingerprintSample(sampleData);
 
     const matched = storedTemplate === newTemplate;
     const score = matched ? 90 : 10;
 
     log(`Verification for user ${userId}: ${matched ? 'Success' : 'Failed'}`);
-    return { 
-      success: true, 
+
+    return {
+      success: true,
       matched,
       score,
       message: matched ? 'Verification successful' : 'Fingerprint does not match'
@@ -106,23 +108,25 @@ async function verifyFingerprint(userId, sampleData) {
   }
 }
 
+// --- Routes ---
+
 // Root endpoint
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'running',
     service: 'Fingerprint API',
-    version: '1.0.0'
+    version: '1.1.0'
   });
 });
 
-// API Endpoints
+// Initialize
 app.post('/fingerprint/initialize', async (req, res) => {
   try {
     log(`Initialize request from ${req.get('Origin') || 'unknown'}`);
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       type: 'initialized',
-      devices: [{ id: 'dp-client', name: 'DigitalPersona Client Scanner' }]
+      devices: [{ id: 'usb-scanner', name: 'Optical USB Fingerprint Scanner' }]
     });
   } catch (error) {
     log(`Initialize error: ${error.message}`, 'error');
@@ -130,12 +134,13 @@ app.post('/fingerprint/initialize', async (req, res) => {
   }
 });
 
+// List Devices
 app.post('/fingerprint/list_devices', async (req, res) => {
   try {
     log('Received list_devices request');
-    res.json({ 
-      success: true, 
-      devices: [{ id: 'dp-client', name: 'DigitalPersona Client Scanner' }]
+    res.json({
+      success: true,
+      devices: [{ id: 'usb-scanner', name: 'Optical USB Fingerprint Scanner' }]
     });
   } catch (error) {
     log(`List devices error: ${error.message}`, 'error');
@@ -143,12 +148,13 @@ app.post('/fingerprint/list_devices', async (req, res) => {
   }
 });
 
+// Capture Fingerprint
 app.post('/fingerprint/capture', async (req, res) => {
   try {
     log('Received capture request');
-    res.json({ 
-      success: true, 
-      message: 'Capture request received; use client-side DigitalPersona scanner'
+    res.json({
+      success: true,
+      message: 'Capture request received; connect USB scanner client to send sample'
     });
   } catch (error) {
     log(`Capture error: ${error.message}`, 'error');
@@ -156,11 +162,12 @@ app.post('/fingerprint/capture', async (req, res) => {
   }
 });
 
+// Enroll Fingerprint
 app.post('/fingerprint/enroll', async (req, res) => {
   try {
-    const { userId, sample } = req.body;
+    const { userId, sample, fingerName, status } = req.body;
     log(`Received enroll request for user ${userId}`);
-    const response = await enrollFingerprint(userId, sample);
+    const response = await enrollFingerprint(userId, sample, fingerName, status);
     res.json(response);
   } catch (error) {
     log(`Enroll error: ${error.message}`, 'error');
@@ -168,6 +175,7 @@ app.post('/fingerprint/enroll', async (req, res) => {
   }
 });
 
+// Verify Fingerprint
 app.post('/fingerprint/verify', async (req, res) => {
   try {
     const { userId, sample } = req.body;
@@ -180,13 +188,14 @@ app.post('/fingerprint/verify', async (req, res) => {
   }
 });
 
+// List Templates
 app.get('/fingerprint/list_templates', async (req, res) => {
   try {
     log('Received list_templates request');
-    const [rows] = await pool.query('SELECT user_id FROM gym_fingerprints');
-    res.json({ 
-      success: true, 
-      templates: rows.map(row => row.user_id),
+    const [rows] = await pool.query('SELECT user_id, finger_name, status, created_at FROM gym_fingerprints');
+    res.json({
+      success: true,
+      templates: rows,
       count: rows.length
     });
   } catch (error) {
@@ -195,18 +204,16 @@ app.get('/fingerprint/list_templates', async (req, res) => {
   }
 });
 
+// Delete Template
 app.delete('/fingerprint/delete_template', async (req, res) => {
   try {
     const { userId } = req.body;
-    if (!userId) {
-      return res.status(400).json({ success: false, error: 'userId is required' });
-    }
+    if (!userId) return res.status(400).json({ success: false, error: 'userId is required' });
+
     log(`Received delete_template request for user ${userId}`);
-    const [result] = await pool.query(
-      'DELETE FROM gym_fingerprints WHERE user_id = ?',
-      [userId]
-    );
-    res.json({ 
+    const [result] = await pool.query('DELETE FROM gym_fingerprints WHERE user_id = ?', [userId]);
+
+    res.json({
       success: result.affectedRows > 0,
       message: result.affectedRows > 0 ? 'Template deleted' : 'Template not found'
     });
@@ -216,13 +223,13 @@ app.delete('/fingerprint/delete_template', async (req, res) => {
   }
 });
 
-// Health Check Endpoint
+// Health Check
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     const [result] = await pool.query('SELECT COUNT(*) as count FROM gym_fingerprints');
-    res.json({ 
-      status: 'ok', 
+    res.json({
+      status: 'ok',
       dbConnected: true,
       templatesCount: result[0].count
     });
@@ -232,17 +239,16 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Error handling middleware
+// Error handling
 app.use((err, req, res, next) => {
   log(`Unhandled error: ${err.message}`, 'error');
   res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
-// Start Server (HTTP only - Render handles HTTPS)
+// Start Server
 app.listen(PORT, async () => {
   log(`Server ready at http://0.0.0.0:${PORT}`);
   log(`Health check at http://0.0.0.0:${PORT}/health`);
-
   try {
     await pool.query('SELECT 1');
     log('Database connected successfully');
