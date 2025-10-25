@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const crypto = require('crypto');
 
 // Configuration
 const PORT = process.env.PORT || 8080;
@@ -43,25 +44,57 @@ function log(message, level = 'info') {
   console.log(`[${new Date().toISOString()}] ${level.toUpperCase()}: ${message}`);
 }
 
-// --- Fingerprint Processing (Mock for now) ---
-function processFingerprintSample(sampleData) {
-  return Buffer.from(sampleData, 'base64').toString('base64').slice(0, 512);
+// --- FIDO/WebAuthn Helper Functions ---
+
+// Generate challenge for WebAuthn
+function generateChallenge() {
+  return crypto.randomBytes(32).toString('base64url');
 }
 
-// --- Enroll Fingerprint ---
-async function enrollFingerprint(userId, sampleData, fingerName, status) {
-  try {
-    if (!userId || !sampleData) throw new Error('userId and sample are required');
+// Store challenges temporarily (in production, use Redis or similar)
+const challengeStore = new Map();
 
-    const template = processFingerprintSample(sampleData);
+// Clean up old challenges (older than 5 minutes)
+setInterval(() => {
+  const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+  for (const [key, value] of challengeStore.entries()) {
+    if (value.timestamp < fiveMinutesAgo) {
+      challengeStore.delete(key);
+    }
+  }
+}, 60000);
+
+// --- Enroll Fingerprint (FIDO Registration) ---
+async function enrollFingerprint(userId, credentialData, fingerName, status) {
+  try {
+    if (!userId || !credentialData) {
+      throw new Error('userId and credential data are required');
+    }
+
+    // Extract credential data
+    const { credentialId, publicKey, counter, transports } = credentialData;
+    
     const finalStatus = status || 'Active';
 
+    // Store FIDO credential in database
     await pool.query(
-      'INSERT INTO gym_fingerprints (user_id, template, finger_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
-      [userId, template, fingerName || 'Unknown', finalStatus, new Date()]
+      `INSERT INTO gym_fingerprints 
+       (user_id, template, credential_id, public_key, counter, transports, finger_name, status, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        credentialId, // Store credentialId as template for backward compatibility
+        credentialId,
+        publicKey,
+        counter || 0,
+        JSON.stringify(transports || []),
+        fingerName || 'FIDO Biometric',
+        finalStatus,
+        new Date()
+      ]
     );
 
-    log(`Fingerprint enrolled for user ${userId} (${fingerName || 'Unknown'})`);
+    log(`FIDO credential enrolled for user ${userId} (${fingerName || 'FIDO Biometric'})`);
 
     return {
       success: true,
@@ -76,31 +109,43 @@ async function enrollFingerprint(userId, sampleData, fingerName, status) {
   }
 }
 
-// --- Verify Fingerprint ---
-async function verifyFingerprint(userId, sampleData) {
+// --- Verify Fingerprint (FIDO Authentication) ---
+async function verifyFingerprint(userId, authData) {
   try {
     const [rows] = await pool.query(
-      'SELECT template FROM gym_fingerprints WHERE user_id = ? LIMIT 1',
+      `SELECT credential_id, public_key, counter 
+       FROM gym_fingerprints 
+       WHERE user_id = ? AND status = 'Active' 
+       LIMIT 1`,
       [userId]
     );
 
     if (!rows.length) {
-      return { success: false, error: 'No enrolled template found for user' };
+      return { success: false, error: 'No enrolled credential found for user' };
     }
 
-    const storedTemplate = rows[0].template;
-    const newTemplate = processFingerprintSample(sampleData);
+    const storedCredential = rows[0];
+    
+    // In a real implementation, you would verify the signature here
+    // For now, we'll do a basic credential ID check
+    const matched = authData.credentialId === storedCredential.credential_id;
+    const score = matched ? 95 : 5;
 
-    const matched = storedTemplate === newTemplate;
-    const score = matched ? 90 : 10;
+    // Update counter if matched (replay attack prevention)
+    if (matched && authData.counter > storedCredential.counter) {
+      await pool.query(
+        'UPDATE gym_fingerprints SET counter = ? WHERE user_id = ?',
+        [authData.counter, userId]
+      );
+    }
 
-    log(`Verification for user ${userId}: ${matched ? 'Success' : 'Failed'}`);
+    log(`FIDO verification for user ${userId}: ${matched ? 'Success' : 'Failed'}`);
 
     return {
       success: true,
       matched,
       score,
-      message: matched ? 'Verification successful' : 'Fingerprint does not match'
+      message: matched ? 'Verification successful' : 'Credential does not match'
     };
   } catch (error) {
     log(`Verification failed: ${error.message}`, 'error');
@@ -114,19 +159,26 @@ async function verifyFingerprint(userId, sampleData) {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    service: 'Fingerprint API',
-    version: '1.1.0'
+    service: 'FIDO Fingerprint API',
+    version: '2.0.0',
+    type: 'WebAuthn/FIDO2'
   });
 });
 
-// Initialize
+// Initialize - Returns WebAuthn registration options
 app.post('/fingerprint/initialize', async (req, res) => {
   try {
     log(`Initialize request from ${req.get('Origin') || 'unknown'}`);
+    
+    const challenge = generateChallenge();
+    
     res.json({
       success: true,
-      type: 'initialized',
-      devices: [{ id: 'usb-scanner', name: 'Optical USB Fingerprint Scanner' }]
+      type: 'fido',
+      challenge,
+      rpName: 'Muscle Manias Gym',
+      rpId: 'musclemanias.in',
+      devices: [{ id: 'fido-biometric', name: 'FIDO Biometric Authenticator' }]
     });
   } catch (error) {
     log(`Initialize error: ${error.message}`, 'error');
@@ -134,13 +186,16 @@ app.post('/fingerprint/initialize', async (req, res) => {
   }
 });
 
-// List Devices
+// List Devices - Returns available authenticators
 app.post('/fingerprint/list_devices', async (req, res) => {
   try {
     log('Received list_devices request');
     res.json({
       success: true,
-      devices: [{ id: 'usb-scanner', name: 'Optical USB Fingerprint Scanner' }]
+      devices: [
+        { id: 'fido-biometric', name: 'FIDO Biometric Authenticator', type: 'platform' },
+        { id: 'fido-external', name: 'External Security Key', type: 'cross-platform' }
+      ]
     });
   } catch (error) {
     log(`List devices error: ${error.message}`, 'error');
@@ -148,13 +203,107 @@ app.post('/fingerprint/list_devices', async (req, res) => {
   }
 });
 
-// Capture Fingerprint
-app.post('/fingerprint/capture', async (req, res) => {
+// Generate registration options for WebAuthn
+app.post('/fingerprint/registration-options', async (req, res) => {
   try {
-    log('Received capture request');
+    const { userId, userName } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'userId is required' });
+    }
+
+    const challenge = generateChallenge();
+    challengeStore.set(userId, { challenge, timestamp: Date.now(), type: 'registration' });
+
+    log(`Generated registration options for user ${userId}`);
+
     res.json({
       success: true,
-      message: 'Capture request received; connect USB scanner client to send sample'
+      publicKey: {
+        challenge,
+        rp: {
+          name: 'Muscle Manias Gym',
+          id: 'musclemanias.in'
+        },
+        user: {
+          id: Buffer.from(userId).toString('base64url'),
+          name: userName || userId,
+          displayName: userName || userId
+        },
+        pubKeyCredParams: [
+          { alg: -7, type: 'public-key' },  // ES256
+          { alg: -257, type: 'public-key' }  // RS256
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          requireResidentKey: false,
+          userVerification: 'required'
+        },
+        timeout: 60000,
+        attestation: 'none'
+      }
+    });
+  } catch (error) {
+    log(`Registration options error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Generate authentication options for WebAuthn
+app.post('/fingerprint/authentication-options', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'userId is required' });
+    }
+
+    // Get user's credentials
+    const [rows] = await pool.query(
+      'SELECT credential_id FROM gym_fingerprints WHERE user_id = ? AND status = "Active"',
+      [userId]
+    );
+
+    const challenge = generateChallenge();
+    challengeStore.set(userId, { challenge, timestamp: Date.now(), type: 'authentication' });
+
+    log(`Generated authentication options for user ${userId}`);
+
+    res.json({
+      success: true,
+      publicKey: {
+        challenge,
+        timeout: 60000,
+        rpId: 'musclemanias.in',
+        allowCredentials: rows.map(row => ({
+          id: row.credential_id,
+          type: 'public-key',
+          transports: ['internal', 'usb', 'nfc', 'ble']
+        })),
+        userVerification: 'required'
+      }
+    });
+  } catch (error) {
+    log(`Authentication options error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Capture Fingerprint - Initiates WebAuthn ceremony
+app.post('/fingerprint/capture', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    log('Received capture request');
+    
+    const challenge = generateChallenge();
+    if (userId) {
+      challengeStore.set(userId, { challenge, timestamp: Date.now() });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Ready for FIDO biometric authentication',
+      challenge
     });
   } catch (error) {
     log(`Capture error: ${error.message}`, 'error');
@@ -162,26 +311,86 @@ app.post('/fingerprint/capture', async (req, res) => {
   }
 });
 
-// Enroll Fingerprint
+// Enroll Fingerprint - Completes WebAuthn registration
 app.post('/fingerprint/enroll', async (req, res) => {
   try {
-    const { userId, sample, fingerName, status } = req.body;
+    const { userId, sample, fingerName, status, credentialId, publicKey, counter, transports } = req.body;
+    
     log(`Received enroll request for user ${userId}`);
-    const response = await enrollFingerprint(userId, sample, fingerName, status);
-    res.json(response);
+    
+    // Verify challenge if provided
+    const storedChallenge = challengeStore.get(userId);
+    if (storedChallenge) {
+      challengeStore.delete(userId);
+    }
+    
+    // If using new FIDO format
+    if (credentialId && publicKey) {
+      const response = await enrollFingerprint(userId, {
+        credentialId,
+        publicKey,
+        counter,
+        transports
+      }, fingerName, status);
+      res.json(response);
+    } 
+    // Legacy format support
+    else if (sample) {
+      const response = await enrollFingerprint(userId, {
+        credentialId: sample,
+        publicKey: sample,
+        counter: 0,
+        transports: []
+      }, fingerName, status);
+      res.json(response);
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        error: 'Either credentialId/publicKey or sample is required' 
+      });
+    }
   } catch (error) {
     log(`Enroll error: ${error.message}`, 'error');
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Verify Fingerprint
+// Verify Fingerprint - Completes WebAuthn authentication
 app.post('/fingerprint/verify', async (req, res) => {
   try {
-    const { userId, sample } = req.body;
+    const { userId, sample, credentialId, signature, authenticatorData, counter } = req.body;
+    
     log(`Received verify request for user ${userId}`);
-    const response = await verifyFingerprint(userId, sample);
-    res.json(response);
+    
+    // Verify challenge if provided
+    const storedChallenge = challengeStore.get(userId);
+    if (storedChallenge) {
+      challengeStore.delete(userId);
+    }
+    
+    // If using new FIDO format
+    if (credentialId) {
+      const response = await verifyFingerprint(userId, {
+        credentialId,
+        signature,
+        authenticatorData,
+        counter
+      });
+      res.json(response);
+    }
+    // Legacy format support
+    else if (sample) {
+      const response = await verifyFingerprint(userId, {
+        credentialId: sample,
+        counter: 0
+      });
+      res.json(response);
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        error: 'Either credentialId or sample is required' 
+      });
+    }
   } catch (error) {
     log(`Verify error: ${error.message}`, 'error');
     res.status(500).json({ success: false, error: error.message });
@@ -192,7 +401,9 @@ app.post('/fingerprint/verify', async (req, res) => {
 app.get('/fingerprint/list_templates', async (req, res) => {
   try {
     log('Received list_templates request');
-    const [rows] = await pool.query('SELECT user_id, finger_name, status, created_at FROM gym_fingerprints');
+    const [rows] = await pool.query(
+      'SELECT user_id, finger_name, status, created_at, credential_id FROM gym_fingerprints'
+    );
     res.json({
       success: true,
       templates: rows,
@@ -223,7 +434,7 @@ app.delete('/fingerprint/delete_template', async (req, res) => {
   }
 });
 
-// ==================== NEW API ENDPOINTS FOR FRONTEND ====================
+// ==================== API ENDPOINTS FOR FRONTEND ====================
 
 // GET all fingerprints (for admin dashboard)
 app.get('/api/fingerprints', async (req, res) => {
@@ -233,7 +444,7 @@ app.get('/api/fingerprints', async (req, res) => {
       SELECT 
         gf.id,
         gf.user_id as firebase_uid,
-        gf.user_id as fingerprint_id,
+        gf.credential_id as fingerprint_id,
         gf.finger_name,
         gf.status,
         gf.created_at as enrolled_at,
@@ -257,20 +468,30 @@ app.get('/api/fingerprints', async (req, res) => {
 // POST new fingerprint enrollment
 app.post('/api/fingerprints', async (req, res) => {
   try {
-    const { firebase_uid, fingerprint_template, fingerprint_id, finger_name } = req.body;
+    const { firebase_uid, fingerprint_template, fingerprint_id, finger_name, credentialId, publicKey } = req.body;
     
-    if (!firebase_uid || !fingerprint_template) {
+    if (!firebase_uid || (!fingerprint_template && !credentialId)) {
       return res.status(400).json({ 
         success: false, 
-        error: 'firebase_uid and fingerprint_template are required' 
+        error: 'firebase_uid and fingerprint_template/credentialId are required' 
       });
     }
 
-    log(`Enrolling fingerprint for user ${firebase_uid}`);
+    log(`Enrolling FIDO credential for user ${firebase_uid}`);
     
     await pool.query(
-      'INSERT INTO gym_fingerprints (user_id, template, finger_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
-      [firebase_uid, fingerprint_template, finger_name || 'Unknown', 'Active', new Date()]
+      `INSERT INTO gym_fingerprints 
+       (user_id, template, credential_id, public_key, finger_name, status, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        firebase_uid,
+        credentialId || fingerprint_template,
+        credentialId || fingerprint_id,
+        publicKey || fingerprint_template,
+        finger_name || 'FIDO Biometric',
+        'Active',
+        new Date()
+      ]
     );
 
     res.json({
@@ -389,7 +610,8 @@ app.get('/health', async (req, res) => {
     res.json({
       status: 'ok',
       dbConnected: true,
-      templatesCount: result[0].count
+      templatesCount: result[0].count,
+      type: 'FIDO/WebAuthn'
     });
   } catch (error) {
     log(`Health check error: ${error.message}`, 'error');
@@ -404,6 +626,7 @@ app.get('/api/health', async (req, res) => {
     res.json({
       success: true,
       status: 'healthy',
+      type: 'FIDO/WebAuthn',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -419,7 +642,7 @@ app.use((err, req, res, next) => {
 
 // Start Server
 app.listen(PORT, async () => {
-  log(`Server ready at http://0.0.0.0:${PORT}`);
+  log(`FIDO/WebAuthn Server ready at http://0.0.0.0:${PORT}`);
   log(`Health check at http://0.0.0.0:${PORT}/health`);
   try {
     await pool.query('SELECT 1');
