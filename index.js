@@ -19,7 +19,7 @@ const app = express();
 // CORS Configuration
 app.use(cors({
   origin: ['https://musclemanias.in', 'http://localhost:3000'],
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
@@ -223,6 +223,164 @@ app.delete('/fingerprint/delete_template', async (req, res) => {
   }
 });
 
+// ==================== NEW API ENDPOINTS FOR FRONTEND ====================
+
+// GET all fingerprints (for admin dashboard)
+app.get('/api/fingerprints', async (req, res) => {
+  try {
+    log('Fetching all fingerprints');
+    const [rows] = await pool.query(`
+      SELECT 
+        gf.id,
+        gf.user_id as firebase_uid,
+        gf.user_id as fingerprint_id,
+        gf.finger_name,
+        gf.status,
+        gf.created_at as enrolled_at,
+        CASE WHEN gf.status = 'Active' THEN 1 ELSE 0 END as is_active,
+        u.name as user_name
+      FROM gym_fingerprints gf
+      LEFT JOIN users u ON gf.user_id = u.firebase_uid
+      ORDER BY gf.created_at DESC
+    `);
+    
+    res.json({
+      success: true,
+      data: rows
+    });
+  } catch (error) {
+    log(`Error fetching fingerprints: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST new fingerprint enrollment
+app.post('/api/fingerprints', async (req, res) => {
+  try {
+    const { firebase_uid, fingerprint_template, fingerprint_id, finger_name } = req.body;
+    
+    if (!firebase_uid || !fingerprint_template) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'firebase_uid and fingerprint_template are required' 
+      });
+    }
+
+    log(`Enrolling fingerprint for user ${firebase_uid}`);
+    
+    await pool.query(
+      'INSERT INTO gym_fingerprints (user_id, template, finger_name, status, created_at) VALUES (?, ?, ?, ?, ?)',
+      [firebase_uid, fingerprint_template, finger_name || 'Unknown', 'Active', new Date()]
+    );
+
+    res.json({
+      success: true,
+      message: 'Fingerprint enrolled successfully'
+    });
+  } catch (error) {
+    log(`Enrollment error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// PUT update fingerprint status
+app.put('/api/fingerprints/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_active } = req.body;
+    
+    const status = is_active ? 'Active' : 'Inactive';
+    
+    log(`Updating fingerprint ${id} status to ${status}`);
+    
+    const [result] = await pool.query(
+      'UPDATE gym_fingerprints SET status = ? WHERE id = ?',
+      [status, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, error: 'Fingerprint not found' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Fingerprint status updated'
+    });
+  } catch (error) {
+    log(`Update fingerprint error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE fingerprint
+app.delete('/api/fingerprints/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    log(`Deleting fingerprint ${id}`);
+    
+    const [result] = await pool.query('DELETE FROM gym_fingerprints WHERE id = ?', [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, error: 'Fingerprint not found' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Fingerprint deleted successfully'
+    });
+  } catch (error) {
+    log(`Delete fingerprint error: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET entry logs
+app.get('/api/entries', async (req, res) => {
+  try {
+    const { date_from, date_to } = req.query;
+    
+    let query = `
+      SELECT 
+        e.id,
+        e.firebase_uid,
+        e.fingerprint_id,
+        e.entry_time,
+        e.entry_status,
+        e.has_active_plan,
+        e.notes,
+        u.name
+      FROM gym_entries e
+      LEFT JOIN users u ON e.firebase_uid = u.firebase_uid
+      WHERE 1=1
+    `;
+    
+    const params = [];
+    
+    if (date_from) {
+      query += ' AND e.entry_time >= ?';
+      params.push(date_from);
+    }
+    
+    if (date_to) {
+      query += ' AND e.entry_time <= ?';
+      params.push(date_to + ' 23:59:59');
+    }
+    
+    query += ' ORDER BY e.entry_time DESC LIMIT 1000';
+    
+    const [rows] = await pool.query(query, params);
+    
+    res.json({
+      success: true,
+      data: rows
+    });
+  } catch (error) {
+    log(`Error fetching entries: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Health Check
 app.get('/health', async (req, res) => {
   try {
@@ -236,6 +394,20 @@ app.get('/health', async (req, res) => {
   } catch (error) {
     log(`Health check error: ${error.message}`, 'error');
     res.status(500).json({ status: 'error', error: 'Database connection failed' });
+  }
+});
+
+// API Health endpoint
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Database connection failed' });
   }
 });
 
